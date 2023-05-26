@@ -1,10 +1,7 @@
 import keras
 from keras import backend as K
-from keras.models import Sequential, Model
+from keras.models import Model
 from keras.layers import Input, LSTM, RepeatVector
-from keras.layers.core import Flatten, Dense, Dropout, Lambda
-from keras.optimizers import SGD, RMSprop, Adam
-from keras import objectives
 
 
 def create_lstm_autoencoder(input_dim, timesteps, latent_dim):
