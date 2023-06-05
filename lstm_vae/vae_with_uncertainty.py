@@ -1,4 +1,5 @@
 import numpy as np
+import tensorflow as tf
 
 import keras
 from keras import backend as K
@@ -50,7 +51,7 @@ def create_lstm_uvae(input_dim,
             `input_backwards`: examples x timesteps x features (same as input, but *possibly* reversed)
         outputs:
             `x_decoded_mean`: examples x timesteps x features: reconstruction from input that should be the same as input_backwards
-            `x_decoded_logit_sigma`: examples x timesteps x features: logit(sigma) of above; this is the "uncertainty" in the reconstruction
+            `x_decoded_sigma_intervaltransform`: examples x timesteps x features: logit(sigma) of above; this is the "uncertainty" in the reconstruction
             `combined_decoder`: examples x timesteps x features*2: concatenation of the above two tensors
 
     # References
@@ -74,26 +75,26 @@ def create_lstm_uvae(input_dim,
         return z_mean + z_sigma_factor * epsilon
 
     # note that "output_shape" isn't necessary with the TensorFlow backend
-    # so you could write `Lambda(sampling)([z_mean, z_logit_sigma])`
+    # so you could write `Lambda(sampling)([z_mean, z_sigma_intervaltransform])`
     z = Lambda(sampling, output_shape=(latent_dim,))([z_mean, z_sigma_factor])
     
     # decoded LSTM layer
     decoder_h = LSTM(intermediate_dim, return_sequences=True)
     decoder_mean = LSTM(input_dim, return_sequences=True, name='decoder_mean')
-    decoder_logit_sigma = LSTM(input_dim, return_sequences=True, name='decoder_logit_sigma')
-    #use "logit" transform to map [-1, 1] to [-inf, inf].
+    decoder_sigma_intervaltransform = LSTM(input_dim, return_sequences=True, name='decoder_sigma_intervaltransform')
+    #use "interval transform" to map [-1, 1] to (0, inf).
 
     h_decoded = RepeatVector(timesteps)(z)
     h_decoded = decoder_h(h_decoded)
 
     # decoded layer
     x_decoded_mean = decoder_mean(h_decoded)
-    x_decoded_logit_sigma = decoder_logit_sigma(h_decoded)
-    combined_x_decoded = Concatenate(axis=2, name="combined_decoder")([x_decoded_mean, x_decoded_logit_sigma])
+    x_decoded_sigma_intervaltransform = decoder_sigma_intervaltransform(h_decoded)
+    combined_x_decoded = Concatenate(axis=2, name="combined_decoder")([x_decoded_mean, x_decoded_sigma_intervaltransform])
     print(type(combined_x_decoded))
     
     # end-to-end autoencoder
-    vae = Model(x, [x_decoded_mean, x_decoded_logit_sigma, combined_x_decoded])
+    vae = Model(x, [x_decoded_mean, x_decoded_sigma_intervaltransform, combined_x_decoded])
 
     # encoder, from inputs to latent space
     encoder = Model(x, z_mean)
@@ -108,10 +109,11 @@ def create_lstm_uvae(input_dim,
     generator = Model(decoder_input, _x_decoded_mean)
     
     def combined_loss(x_possibly_backwards, outputs):
-        x_decoded_mean, x_decoded_logit_sigma = outputs[:, :, :input_dim], outputs[:, :, input_dim:]
-        x_decoded_logit_sigma = x_decoded_logit_sigma * .4999 + .5 # map [-1, 1] to [0, 1]
-        x_decoded_sigma = K.log(x_decoded_logit_sigma/(1-x_decoded_logit_sigma))
-        xent_loss = K.mean(K.square((x_possibly_backwards - x_decoded_mean) * x_decoded_sigma)) * .5 + K.mean(x_decoded_logit_sigma / (1 - x_decoded_logit_sigma))
+        x_decoded_mean, x_decoded_sigma_intervaltransform = outputs[:, :, :input_dim], outputs[:, :, input_dim:]
+        x_decoded_sigma_intervaltransform = x_decoded_sigma_intervaltransform * .49 + .5 # map [-1, 1] to [0, 1]
+        x_decoded_sigma = (x_decoded_sigma_intervaltransform/(1-x_decoded_sigma_intervaltransform)) / 2 # map [0, 1] to [0, inf]
+        xent_loss = (K.mean(K.square((x_possibly_backwards - x_decoded_mean) / x_decoded_sigma) * (tf.sign(x_possibly_backwards) ** 2)) * .5 + #only count loss on the "real" part of the input
+                    K.mean(K.log(x_decoded_sigma) * (tf.sign(x_possibly_backwards) ** 2))) #add in the loss from the "uncertainty" in the reconstruction
         kl_loss = - 0.5 * K.mean(1 - K.abs(z_sigma_factor) - K.square(z_mean) + K.log(K.abs(z_sigma_factor) + K.epsilon()))
         loss = xent_loss + kl_loss
         return loss
